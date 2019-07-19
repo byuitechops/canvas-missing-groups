@@ -1,25 +1,27 @@
 var canvas = require('canvas-api-wrapper'),
     dsv = require('d3-dsv'),
     pMap = require('p-map'),
+    chalk = require('chalk'),
     fs = require('fs');
 
 function printPretty(obj) {
     console.log(JSON.stringify(obj, null, 4));
 }
 
-var subAccounts = [{
-    name: `pathwayScaled`,
-    id: 110
-},
-{
-    name: `onlineScaled`,
-    id: 44
-}
+var subAccounts = [
+    {
+        name: `pathwayScaled`,
+        id: 110
+    },
+    {
+        name: `onlineScaled`,
+        id: 44
+    }
 ],
     // var term = ""
     terms = [{
-        name: "Spring2019",
-        id: 23
+        name: "Summer 2019",
+        id: 91
     }];
 
 
@@ -27,16 +29,16 @@ async function getGroupCategories(courseId) {
     function sortOnName(a, b) {
         if (a.name === b.name) {
             return 0;
+        } else if (a.name > b.name) {
+            return 1;
         }
-        return a.name > b.name;
+        return -1;
     }
+
     try {
-
-
         var groupCats = await canvas.get(`/api/v1/courses/${courseId}/group_categories`);
         groupCats = groupCats
             .sort(sortOnName)
-
             .map(cat => ({
                 id: cat.id,
                 name: cat.name
@@ -55,7 +57,7 @@ async function getGroupCategories(courseId) {
             return `|||${cat.name} || ${cat.groups.join('|')}`
         }).join(' ');
     } catch (error) {
-        console.error(error);
+        console.error(chalk.red(error));
         return `could not get groups for ${courseId}`;
     }
 }
@@ -74,11 +76,20 @@ function semesterBlueprintSIStoMasterSIS(BpSIS) {
     // PSYCH 302.Initiative.None.2019.Spring.None.Blueprint
     // PSYCH 302.Initiative.None.None.Master (no Ccv) 
 
+    // semester blueprint
+    // BA 211.Initiative.None.2019.Summer.None.Blueprint
+    //    BA 211.Initiative.None.2019.Summer.None.Blueprint
+    // master
+    // BA 211.Initiative.None.Block.Master
+    //    BA 211.Initiative.None.Block.Master
     var [courseCode, init, none, year, semester, block, blueprint] = BpSIS.split('.');
     // remove the number from the block if it has one
-    block = block.replace(/\d/, '');
+    block = block.replace(/\d/g, '');
     // send it back
-    return [courseCode, init, none, block].join('.') + ".Master";
+    // had to hard code Block For the summer courses
+    // return [courseCode, init, none, "Block", "Master"].join('.');
+    return [courseCode, init, none, block, "Master"].join('.');
+    // FAML 110.Initiative.None.None.Master
 }
 
 async function getSemesterBlueprint(courseId) {
@@ -104,11 +115,11 @@ function makePercentComplete(lengthIn) {
 }
 var groupDataPercent;
 async function getGroupData(course, i) {
-    console.log(i, course.sis, groupDataPercent());
-    
+    console.log(`${i} ${groupDataPercent()} ${course.sis}`);
+
     course.groupCategories = await getGroupCategories(course.id);
     var semesterBlueprint = await getSemesterBlueprint(course.id);
-    
+
     if (semesterBlueprint !== undefined) {
         course.semesterBpSISId = semesterBlueprint.sis_course_id;
         course.semesterBpCourseId = semesterBlueprint.id;
@@ -121,8 +132,7 @@ async function getGroupData(course, i) {
         course.masterGroupsCategories = await getGroupCategories(`sis_course_id:${course.masterSISId}`);
         // are the Master and the section the same?
         course.sameGroupsMaster = course.masterGroupsCategories === course.groupCategories;
-    }
-    else {
+    } else {
         printPretty(semesterBlueprint);
         course.parentGroupCategories = "Doesn't have a blue print";
     }
@@ -130,17 +140,24 @@ async function getGroupData(course, i) {
 }
 
 
-
+function makeFileName(terms, subAccounts) {
+    var termNames = terms.map(term => term.name.replace(/ /g, '')).join('.'),
+        subAccountNames = subAccounts.map(subAccount => subAccount.name.replace(/ /g, '')).join('.');
+    return `${termNames}+${subAccountNames}+GroupReport_${Date.now()}.csv`
+}
 
 async function main() {
     try {
-        var term = terms[0],
+        var term,
             courses = [];
 
-        for (let i = 0; i < subAccounts.length; i++) {
-            const subAccount = subAccounts[i];
-            let coursesI = await canvas.get(`/api/v1/accounts/${subAccount.id}/courses?sort=sis_course_id&order=asc&search_by=course&include%5B%5D=subaccount&enrollment_term_id=${term.id}&include[]=term`)
-            courses = courses.concat(coursesI);
+        for (let j = 0; j < terms.length; j++) {
+            term = terms[j];
+            for (let i = 0; i < subAccounts.length; i++) {
+                const subAccount = subAccounts[i];
+                let coursesI = await canvas.get(`/api/v1/accounts/${subAccount.id}/courses?sort=sis_course_id&order=asc&search_by=course&include%5B%5D=subaccount&enrollment_term_id=${term.id}&include[]=term`)
+                courses = courses.concat(coursesI);
+            }
         }
 
         //get all the courses we need
@@ -149,7 +166,9 @@ async function main() {
 
         // pretty(courses[0]);
         var courses = courses
-            .filter(course => course.term.id === term.id)
+            .filter(course => {
+                return terms.some(term => term.id === course.term.id);
+            })
             .map(course => ({
                 name: course.name,
                 id: course.id,
@@ -166,7 +185,7 @@ async function main() {
                 }
                 return 0;
             });
-        // pretty(courses[0]);
+        printPretty(courses[0]);
         // courses = courses.slice(0, 5);
         console.log(courses.length);
 
@@ -179,19 +198,19 @@ async function main() {
         groupDataPercent = makePercentComplete(courses.length);
 
         //loop them to get their group data
-        courses = await pMap(courses, getGroupData, { concurrency: 5 });
+        courses = await pMap(courses, getGroupData, {
+            concurrency: 5
+        });
 
-        var fileName = `${term.name}OnlineCoursesGroupReport_${Date.now()}.csv`;
+        var fileName = makeFileName(terms, subAccounts);
 
         //make report
         fs.writeFileSync(fileName, dsv.csvFormat(courses), 'utf8');
         console.log(`Wrote ${fileName}`);
 
     } catch (error) {
-        console.error(error);
+        console.error(chalk(error));
     }
 }
 
 main();
-
-
