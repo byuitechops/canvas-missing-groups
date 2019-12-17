@@ -4,6 +4,7 @@ var canvas = require('canvas-api-wrapper'),
     chalk = require('chalk'),
     fs = require('fs');
 
+
 function printPretty(obj) {
     console.log(JSON.stringify(obj, null, 4));
 }
@@ -19,8 +20,8 @@ var subAccounts = [
     }
 ],
     terms = [{
-        name: "Fall 2019",
-        id: 89
+        name: "Winter20",
+        id: 93
     }];
 
 function fixCode(code) {
@@ -32,7 +33,7 @@ var tempCourseCode = {
     "BUS 115": "BUSPC 115",
     "CS 101": "CSPC 101",
     "FAML 160": "FAMPC 160",
-    "FAML 498R": "",
+    // "FAML 498R": "",
     "SI 250": "",
     "HTMBC 110": "HTMPC 110",
     "REL 261": "RELPC 261",
@@ -52,31 +53,29 @@ async function getGroupCategories(courseId) {
         return -1;
     }
 
-    try {
-        var groupCats = await canvas.get(`/api/v1/courses/${courseId}/group_categories`);
-        groupCats = groupCats
-            .sort(sortOnName)
-            .map(cat => ({
-                id: cat.id,
-                name: cat.name
-            }));
+
+    var groupCats = await canvas.get(`/api/v1/courses/${courseId}/group_categories`);
+    groupCats = groupCats
+        .sort(sortOnName)
+        .map(cat => ({
+            id: cat.id,
+            name: cat.name,
+            selfSignUp: cat.self_signup === null ? "off" : "on",
+            groupLimit: cat.group_limit === null ? "off" : cat.group_limit
+        }));
 
 
-        // get the groups 
-        for (let i = 0; i < groupCats.length; i++) {
-            const cat = groupCats[i];
-            let groups = await canvas.get(`api/v1/group_categories/${cat.id}/groups`);
-            cat.groups = groups.map(group => group.name).sort();
-        }
-
-
-        return groupCats.map(cat => {
-            return `|||${cat.name} || ${cat.groups.join('|')}`
-        }).join(' ');
-    } catch (error) {
-        console.error(chalk.red(error));
-        return `could not get groups for ${courseId}`;
+    // get the groups 
+    for (let i = 0; i < groupCats.length; i++) {
+        const cat = groupCats[i];
+        let groups = await canvas.get(`api/v1/group_categories/${cat.id}/groups`);
+        cat.groups = groups.map(group => group.name).sort();
     }
+
+
+    return groupCats.map(cat => {
+        return `|||${cat.name}-SU:${cat.selfSignUp}-GL:${cat.groupLimit} || ${cat.groups.join('|')}`
+    }).join(' ');
 }
 
 function semesterBlueprintSIStoMasterSIS(BpSIS) {
@@ -101,16 +100,19 @@ function semesterBlueprintSIStoMasterSIS(BpSIS) {
     // BA 211.Initiative.None.Block.Master
     //    BA 211.Initiative.None.Block.Master
     var [courseCode, init, none, year, semester, block, blueprint] = BpSIS.split('.');
+
+
+    // if (BpSIS === "SI 250.Gathering.2019.Fall.Blueprint") {
+    //     return "SI 250.--.None.None.Master";
+    // }
     if (courseCode === "FAML 498R") {
+        //the code is set to this "FAML 498R.Internship/Project.None.None.Master" i change it and run it and then set it back
         return "FAML 498R.Internship-Project.None.None.Master";
     }
-    if(BpSIS === "SI 250.Gathering.2019.Fall.Blueprint"){
-        return "SI 250.--.None.None.Master";
-    }
-    try{
+    try {
         // remove the number from the block if it has one
         block = block.replace(/\d/g, '');
-    }catch(error){
+    } catch (error) {
         console.error(error);
         console.log(chalk.yellow(BpSIS));
     }
@@ -119,9 +121,15 @@ function semesterBlueprintSIStoMasterSIS(BpSIS) {
     if (localTempCourseCode !== undefined) {
         courseCode = localTempCourseCode;
     }
+
+
     // send it back
     // had to hard code Block For the summer courses
     // return [courseCode, init, none, "Block", "Master"].join('.');
+    var codeOut = [courseCode, init, none, block, "Master"].join('.');
+    if (courseCode === "" || codeOut === "" || codeOut.includes('/')) {
+        throw new Error("Invalid MasterSISId:" + codeOut)
+    }
     return [courseCode, init, none, block, "Master"].join('.');
     // FAML 110.Initiative.None.None.Master
 }
@@ -151,30 +159,69 @@ var groupDataPercent;
 async function getGroupData(course, i) {
     console.log(`${i} ${groupDataPercent()} ${course.sis}`);
 
-    course.groupCategories = await getGroupCategories(course.id);
+    // get the courses
+    try {
+        course.groupCategories = await getGroupCategories(course.id);
+    } catch (error) {
+        console.error(chalk.red(error));
+        course.Error = true;
+        course.groupCategories = `Could not get groups for ${courseId}`;
+    }
+
     var semesterBlueprint = await getSemesterBlueprint(course.id);
 
-    if (semesterBlueprint !== undefined) {
-        course.semesterBpSISId = semesterBlueprint.sis_course_id;
-        course.semesterBpCourseId = semesterBlueprint.id;
-        course.parentGroupCategories = await getGroupCategories(semesterBlueprint.id);
-        // are the blueprint and the section the same?
-        course.sameGroupsSemester = course.parentGroupCategories === course.groupCategories;
-        // get the mater course id
-        try {
-
-            course.masterSISId = semesterBlueprintSIStoMasterSIS(course.semesterBpSISId);
-        } catch (error) {
-            console.error(error);
-        }
-        // get the groups from the masterCourse
-        course.masterGroupsCategories = await getGroupCategories(`sis_course_id:${course.masterSISId}`);
-        // are the Master and the section the same?
-        course.sameGroupsMaster = course.masterGroupsCategories === course.groupCategories;
-    } else {
-        printPretty(semesterBlueprint);
+    if (semesterBlueprint === undefined) {
         course.parentGroupCategories = "Doesn't have a blue print";
+        course.Error = true;
+        return course;
     }
+
+    // record these
+    course.semesterBpSISId = semesterBlueprint.sis_course_id;
+    course.semesterBpCourseId = semesterBlueprint.id;
+
+    // get the groups for sememster blueprint
+    try {
+        course.parentGroupCategories = await getGroupCategories(semesterBlueprint.id);
+    } catch (error) {
+        console.error(chalk.red(error));
+        course.Error = true;
+        course.parentGroupCategories = `Could not get groups for ${semesterBlueprint.id}`;
+    }
+
+    // are the blueprint and the section the same?
+    course.BlueprintAndSectionMatch = course.parentGroupCategories === course.groupCategories;
+    
+    // get the mater course id
+    try {
+        course.masterSISId = semesterBlueprintSIStoMasterSIS(course.semesterBpSISId);
+    } catch (error) {
+        course.masterSISId = error.message;
+        course.Error = true;
+        console.error(chalk.red(error));
+    }
+
+    // get the groups from the masterCourse
+    try {
+        course.masterGroupsCategories = await getGroupCategories(`sis_course_id:${course.masterSISId}`);
+    } catch (error) {
+        console.error(chalk.red(error));
+        course.Error = true;
+        course.masterGroupsCategories = `could not get groups for ${course.masterSISId}`;
+    }
+
+    try {
+        var masterCourse = await canvas.get(`/api/v1/courses/sis_course_id:${course.masterSISId}`);
+        course.masterCourseId =  masterCourse.id;
+    } catch (error) {
+        course.Error = true;
+        course.masterCourseId = `could not get masterCourseid for ${course.masterSISId}`;
+    }
+
+    // are the Master and the section the same?
+    course.MasterAndBlueprintMatch = course.masterGroupsCategories === course.parentGroupCategories;
+    course.MasterAndSectionMatch = course.masterGroupsCategories === course.groupCategories;
+    
     return course;
 }
 
@@ -185,29 +232,43 @@ function makeFileName(terms, subAccounts) {
     return `${termNames}+${subAccountNames}+GroupReport_${Date.now()}.csv`
 }
 
- async function getCourses(){
+async function getCourses(onlyThisTerm) {
+    console.log("getting courses from Canvas");
     var term,
-    courses = [];
-
+        courses = [];
+    canvas.oncall = function (e) {
+        console.log(e)
+    }
     for (let j = 0; j < terms.length; j++) {
         term = terms[j];
+        console.log(`getting courses for ${term.name}`);
         for (let i = 0; i < subAccounts.length; i++) {
             const subAccount = subAccounts[i];
-            let coursesI = await canvas.get(`/api/v1/accounts/${subAccount.id}/courses?sort=sis_course_id&order=asc&search_by=course&include%5B%5D=subaccount&enrollment_term_id=${term.id}&include[]=term`)
+            console.log(`\tgetting courses for ${subAccount.name}`);
+            let coursesI = await canvas.get(`/api/v1/accounts/${subAccount.id}/courses?sort=sis_course_id&order=asc&search_by=course&include%5B%5D=subaccount&enrollment_term_id=${term.id}&include[]=term&per_page=100`)
             courses = courses.concat(coursesI);
         }
     }
+    canvas.oncall = function () { };
+    console.log("done getting courses");
     printPretty(courses[0]);
-   return courses
-            .filter(course => {
-                return terms.some(term => term.id === course.term.id);
-            })
-            .filter(course => {
-                return subAccounts.some(subAccount => subAccount.id === course.account_id);
-            });
+    courses = courses
+        .filter(course => {
+            return terms.some(term => term.id === course.term.id);
+        });
+
+    if (onlyThisTerm) {
+        courses = courses.filter(course => {
+            return subAccounts.some(subAccount => subAccount.id === course.account_id);
+        });
+    }
+
+    return courses;
 }
 
-async function getCoursesCSV(){
+async function getCoursesCSV() {
+    console.log("getting courses from CSV");
+
     async function getCSV(courseCsvFile) {
         const stripBOM = require('strip-bom');
         const dsv = require('d3-dsv');
@@ -219,15 +280,15 @@ async function getCoursesCSV(){
         var csvCourseData = dsv.csvParse(stripBOM(fs.readFileSync(courseCsvFile, 'utf8')));
         return csvCourseData;
     }
-    
-    async function getCourseFromSection(courseIn){
-        var section =  await canvas.get(`/api/v1/sections/sis_section_id:${courseIn.sisID}`);
-        return  await canvas.get(`/api/v1/courses/${section.course_id}?include%5B%5D=subaccount&include[]=term`);
+
+    async function getCourseFromSection(courseIn) {
+        var section = await canvas.get(`/api/v1/sections/sis_section_id:${courseIn.sisID}`);
+        return await canvas.get(`/api/v1/courses/${section.course_id}?include%5B%5D=subaccount&include[]=term`);
     }
-    
+
     var courses = await getCSV(`./tempList.csv`);
-    
-    courses = await pMap(courses,getCourseFromSection,{concurrency: 10});
+
+    courses = await pMap(courses, getCourseFromSection, { concurrency: 10 });
     return courses;
 
 }
@@ -242,12 +303,10 @@ async function main() {
         //get all the courses we need
         // pretty(pathwayCourses[0]);
         //filter for winter term
-
-        
-        courses = await getCoursesCSV();
+        courses = await getCourses(false);
         printPretty(courses[0]);
-        
-        courses = courses 
+
+        courses = courses
             .map(course => ({
                 name: course.name,
                 id: course.id,
@@ -284,7 +343,7 @@ async function main() {
 
         //loop them to get their group data
         courses = await pMap(courses, getGroupData, {
-            concurrency: 10
+            concurrency: 20
         });
 
         var fileName = makeFileName(terms, subAccounts);
